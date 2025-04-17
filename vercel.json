@@ -2,14 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "stock_web_app.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "stock_web_app.py"
+      "dest": "api/index.py"
     }
   ],
   "env": {
