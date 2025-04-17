@@ -17,7 +17,12 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # 导入数据处理功能从原应用程序
-from qt_stock_app import IntraDayDataThread
+try:
+    from qt_stock_app import IntraDayDataThread
+except ImportError:
+    # 为Vercel部署定义一个占位符类
+    class IntraDayDataThread:
+        pass
 
 # 配置
 DEFAULT_STOCK = "AAPL"
@@ -29,8 +34,10 @@ if not os.path.exists('assets'):
     os.makedirs('assets')
 
 # 创建CSS文件
-with open('assets/custom.css', 'w') as f:
-    f.write('''
+css_path = os.path.join('assets', 'custom.css')
+if not os.path.exists(css_path):
+    with open(css_path, 'w') as f:
+        f.write('''
 /* 下拉框样式 */
 .dash-dropdown .Select-control {
     background-color: #2c3e50 !important;
@@ -88,6 +95,9 @@ app = dash.Dash(
     meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
 )
 
+# 为Vercel部署设置服务器
+server = app.server
+
 # 页面布局
 app.layout = dbc.Container([
     # 使用dcc.Store替代html.Style和html.Div
@@ -144,6 +154,36 @@ app.layout = dbc.Container([
                     
                     dbc.Row([
                         dbc.Col([
+                            html.Label("趋势线设置:"),
+                            dbc.Row([
+                                dbc.Col([
+                                    html.Label("窗口大小:"),
+                                    dcc.Slider(
+                                        id="trend-window-slider",
+                                        min=3,
+                                        max=20,
+                                        step=1,
+                                        value=10,
+                                        marks={i: str(i) for i in range(3, 21, 2)},
+                                    ),
+                                ], width=6),
+                                dbc.Col([
+                                    html.Label("斜率阈值:"),
+                                    dcc.Slider(
+                                        id="trend-slope-slider",
+                                        min=0.0001,
+                                        max=0.01,
+                                        step=0.0001,
+                                        value=0.001,
+                                        marks={i/10000: str(i/10000) for i in range(1, 101, 20)},
+                                    ),
+                                ], width=6),
+                            ]),
+                        ], width=12),
+                    ], className="mt-2"),
+                    
+                    dbc.Row([
+                        dbc.Col([
                             dbc.Button("加载数据", id="load-button", color="primary", className="mt-3 w-100"),
                         ], width=12),
                     ]),
@@ -197,6 +237,7 @@ app.layout = dbc.Container([
     ]),
     
     dcc.Store(id="stock-data"),
+    dcc.Store(id="trend-lines-data"),
     
 ], fluid=True)
 
@@ -335,10 +376,10 @@ def load_stock_data(n_clicks, stock_code, period, interval):
         Output("macd-chart", "figure"),
         Output("rsi-chart", "figure"),
     ],
-    [Input("stock-data", "data")],
+    [Input("stock-data", "data"), Input("trend-lines-data", "data")],
     prevent_initial_call=True
 )
-def update_charts(json_data):
+def update_charts(json_data, trend_lines_data):
     if not json_data:
         # 返回空图表
         empty_fig = go.Figure()
@@ -512,6 +553,128 @@ def update_charts(json_data):
                     line=dict(color='red', width=1)
                 )
             ))
+            
+        # 添加趋势线
+        try:
+            if trend_lines_data:
+                # 从存储的JSON数据中提取趋势线
+                support_lines_json = trend_lines_data.get('support_lines', [])
+                resistance_lines_json = trend_lines_data.get('resistance_lines', [])
+                last_index_str = trend_lines_data.get('last_index')
+                last_index = pd.to_datetime(last_index_str) if last_index_str else None
+                
+                # 添加支撑线(最多显示5条最显著的线)
+                significant_support_lines = support_lines_json[:min(5, len(support_lines_json))]
+                for i, line_data in enumerate(significant_support_lines):
+                    x1 = pd.to_datetime(line_data['x1'])
+                    y1 = line_data['y1']
+                    x2 = pd.to_datetime(line_data['x2'])
+                    y2 = line_data['y2']
+                    
+                    price_fig.add_shape(
+                        type="line",
+                        x0=x1, y0=y1, x1=x2, y1=y2,
+                        line=dict(
+                            color="green",
+                            width=2,
+                            dash="solid",
+                        ),
+                        name=f"支撑线{i+1}"
+                    )
+                    
+                    # 向右扩展趋势线
+                    if last_index and x2 < last_index:
+                        # 计算斜率
+                        slope = (y2 - y1) / (x2 - x1).total_seconds()
+                        # 计算扩展时间
+                        time_extend = (last_index - x2).total_seconds()
+                        # 计算扩展点的y值
+                        y_extend = y2 + slope * time_extend
+                        # 添加扩展线
+                        price_fig.add_shape(
+                            type="line",
+                            x0=x2, y0=y2, x1=last_index, y1=y_extend,
+                            line=dict(
+                                color="green",
+                                width=2,
+                                dash="dot",
+                            )
+                        )
+                
+                # 添加阻力线(最多显示5条最显著的线)
+                significant_resistance_lines = resistance_lines_json[:min(5, len(resistance_lines_json))]
+                for i, line_data in enumerate(significant_resistance_lines):
+                    x1 = pd.to_datetime(line_data['x1'])
+                    y1 = line_data['y1']
+                    x2 = pd.to_datetime(line_data['x2'])
+                    y2 = line_data['y2']
+                    
+                    price_fig.add_shape(
+                        type="line",
+                        x0=x1, y0=y1, x1=x2, y1=y2,
+                        line=dict(
+                            color="red",
+                            width=2,
+                            dash="solid",
+                        ),
+                        name=f"阻力线{i+1}"
+                    )
+                    
+                    # 向右扩展趋势线
+                    if last_index and x2 < last_index:
+                        # 计算斜率
+                        slope = (y2 - y1) / (x2 - x1).total_seconds()
+                        # 计算扩展时间
+                        time_extend = (last_index - x2).total_seconds()
+                        # 计算扩展点的y值
+                        y_extend = y2 + slope * time_extend
+                        # 添加扩展线
+                        price_fig.add_shape(
+                            type="line",
+                            x0=x2, y0=y2, x1=last_index, y1=y_extend,
+                            line=dict(
+                                color="red",
+                                width=2,
+                                dash="dot",
+                            )
+                        )
+                
+                # 添加趋势线数量标签
+                price_fig.add_annotation(
+                    text=f"支撑线: {len(significant_support_lines)}  阻力线: {len(significant_resistance_lines)}",
+                    align="left",
+                    x=0.01,
+                    y=0.99,
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                    font=dict(color="white", size=10),
+                )
+            else:
+                price_fig.add_annotation(
+                    text="未找到趋势线数据",
+                    align="left",
+                    x=0.01,
+                    y=0.99,
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                    font=dict(color="yellow", size=10),
+                )
+                
+        except Exception as e:
+            print(f"添加趋势线时出错: {str(e)}")
+            # 添加错误标签
+            price_fig.add_annotation(
+                text=f"趋势线绘制失败: {str(e)}",
+                align="left",
+                x=0.01,
+                y=0.99,
+                xref="paper",
+                yref="paper",
+                showarrow=False,
+                font=dict(color="red", size=10),
+            )
         
         # 设置价格图表布局
         if len(data.index) > 0:
@@ -1125,7 +1288,7 @@ def update_table(json_data):
             bordered=True,
             hover=True,
             responsive=True,
-            dark=True,
+            color="dark",
         )
         
         return table
@@ -1134,6 +1297,150 @@ def update_table(json_data):
         print(f"表格更新错误: {str(e)}")
         print(traceback.format_exc())
         return html.Div(f"表格更新错误: {str(e)}", className="text-danger")
+
+def identify_trend_lines(df, window_size=5, slope_threshold=0.01):
+    """识别数据中的趋势线
+    
+    Args:
+        df: 包含价格数据的DataFrame
+        window_size: 用于识别局部最高点和最低点的窗口大小
+        slope_threshold: 斜率阈值，用于确定线的重要性
+        
+    Returns:
+        元组 (上升趋势线, 下降趋势线)，每个都是一个列表，包含(x1, y1, x2, y2)的点对
+    """
+    # 确保索引是递增的数字，便于处理
+    x = np.arange(len(df))
+    y = df['Close'].values
+    
+    # 查找局部极大值和极小值
+    max_idx = []
+    min_idx = []
+    
+    for i in range(window_size, len(df) - window_size):
+        # 检查是否是局部最大值
+        if y[i] == max(y[i-window_size:i+window_size+1]):
+            max_idx.append(i)
+        # 检查是否是局部最小值
+        if y[i] == min(y[i-window_size:i+window_size+1]):
+            min_idx.append(i)
+    
+    # 找出支撑线（连接低点的线）
+    support_lines = []
+    for i in range(len(min_idx)):
+        for j in range(i+1, len(min_idx)):
+            idx1, idx2 = min_idx[i], min_idx[j]
+            # 计算斜率
+            if idx2 - idx1 > 0:  # 避免除以零
+                slope = (y[idx2] - y[idx1]) / (idx2 - idx1)
+                # 如果斜率在阈值范围内，添加线
+                if abs(slope) > slope_threshold:
+                    support_lines.append((
+                        x[idx1], y[idx1], x[idx2], y[idx2]
+                    ))
+    
+    # 找出阻力线（连接高点的线）
+    resistance_lines = []
+    for i in range(len(max_idx)):
+        for j in range(i+1, len(max_idx)):
+            idx1, idx2 = max_idx[i], max_idx[j]
+            # 计算斜率
+            if idx2 - idx1 > 0:  # 避免除以零
+                slope = (y[idx2] - y[idx1]) / (idx2 - idx1)
+                # 如果斜率在阈值范围内，添加线
+                if abs(slope) > slope_threshold:
+                    resistance_lines.append((
+                        x[idx1], y[idx1], x[idx2], y[idx2]
+                    ))
+    
+    # 将索引转换回日期
+    result_support = []
+    result_resistance = []
+    
+    for x1, y1, x2, y2 in support_lines:
+        result_support.append((
+            df.index[int(x1)], y1, df.index[int(x2)], y2
+        ))
+    
+    for x1, y1, x2, y2 in resistance_lines:
+        result_resistance.append((
+            df.index[int(x1)], y1, df.index[int(x2)], y2
+        ))
+    
+    return result_support, result_resistance
+
+# 趋势线数据计算回调
+@app.callback(
+    Output("trend-lines-data", "data"),
+    [Input("stock-data", "data"), Input("trend-window-slider", "value"), Input("trend-slope-slider", "value")],
+    prevent_initial_call=True
+)
+def calculate_trend_lines(json_data, trend_window_size, trend_slope_threshold):
+    if not json_data:
+        return None
+    
+    # 设置默认值，以防参数为None
+    if trend_window_size is None:
+        trend_window_size = 10
+    if trend_slope_threshold is None:
+        trend_slope_threshold = 0.001
+        
+    print(f"计算趋势线 - 窗口大小: {trend_window_size}, 斜率阈值: {trend_slope_threshold}")
+    
+    try:
+        # 解析数据
+        data = pd.read_json(json_data, orient='split')
+        
+        # 处理日期列，兼容不同的命名
+        if 'Datetime' in data.columns and 'Date' not in data.columns:
+            data = data.rename(columns={'Datetime': 'Date'})
+        
+        # 确保Date列是日期时间类型并设置为索引
+        if 'Date' not in data.columns:
+            print("数据中缺少Date列，无法计算趋势线")
+            return None
+        
+        data['Date'] = pd.to_datetime(data['Date'])
+        data.set_index('Date', inplace=True)
+        
+        # 计算趋势线
+        try:
+            support_lines, resistance_lines = identify_trend_lines(data, window_size=trend_window_size, slope_threshold=trend_slope_threshold)
+            
+            # 将datetime对象转换为字符串，以便JSON序列化
+            support_lines_json = []
+            for x1, y1, x2, y2 in support_lines:
+                support_lines_json.append({
+                    'x1': x1.isoformat(),
+                    'y1': float(y1),
+                    'x2': x2.isoformat(),
+                    'y2': float(y2)
+                })
+                
+            resistance_lines_json = []
+            for x1, y1, x2, y2 in resistance_lines:
+                resistance_lines_json.append({
+                    'x1': x1.isoformat(),
+                    'y1': float(y1),
+                    'x2': x2.isoformat(),
+                    'y2': float(y2)
+                })
+            
+            trend_data = {
+                'support_lines': support_lines_json,
+                'resistance_lines': resistance_lines_json,
+                'last_index': data.index[-1].isoformat() if len(data.index) > 0 else None
+            }
+            
+            return trend_data
+            
+        except Exception as e:
+            print(f"计算趋势线时出错: {str(e)}")
+            return None
+            
+    except Exception as e:
+        print(f"趋势线数据计算失败: {str(e)}")
+        return None
 
 # 启动服务器
 if __name__ == "__main__":
@@ -1148,4 +1455,9 @@ if __name__ == "__main__":
     host = os.environ.get('HOST', args.host)
     
     print(f"应用将在 http://{host}:{port}/ 启动")
-    app.run(debug=True, port=port, host=host) 
+    app.run(debug=True, port=port, host=host)
+else:
+    # 用于Vercel部署
+    # 注意这是Vercel需要的入口点，不要修改这一行
+    # app.server是Flask应用实例
+    application = app.server 
